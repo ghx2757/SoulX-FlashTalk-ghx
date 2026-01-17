@@ -53,6 +53,7 @@ class FlashTalkPipeline:
         wav2vec_dir,
         device="cuda",
         use_usp=False,
+        cpu_offload=False,
         num_timesteps=1000,
         use_timestep_transform=True,
     ):
@@ -74,6 +75,7 @@ class FlashTalkPipeline:
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.use_usp = use_usp and dist.is_initialized()
         self.param_dtype = config.param_dtype
+        self.cpu_offload = cpu_offload and not self.use_usp
 
         self.text_encoder = T5EncoderModel(
             text_len=config.text_len,
@@ -103,7 +105,7 @@ class FlashTalkPipeline:
 
         self.model = WanModel.from_pretrained(
             checkpoint_dir,
-            device_map=self.device,
+            device_map='cpu' if self.cpu_offload else self.device,
             torch_dtype=self.param_dtype,
         )
 
@@ -134,9 +136,9 @@ class FlashTalkPipeline:
         self.num_timesteps = num_timesteps
         self.use_timestep_transform = use_timestep_transform
 
-        if COMPILE_MODEL:
+        if COMPILE_MODEL and not self.cpu_offload:
             self.model = torch.compile(self.model)
-        if COMPILE_VAE:
+        if COMPILE_VAE and not self.cpu_offload:
             self.vae.encode = torch.compile(self.vae.encode)
             self.vae.decode = torch.compile(self.vae.decode)
 
@@ -157,7 +159,12 @@ class FlashTalkPipeline:
                         color_correction_strength=0.0,
                         ):
 
+        if self.cpu_offload:
+            self.text_encoder.model.to(self.device)
         context = self.text_encoder([input_prompt], self.device)[0]
+        if self.cpu_offload:
+            self.text_encoder.model.cpu()
+            torch.cuda.empty_cache()
 
         self.frame_num = frame_num
         self.motion_frames_num = motion_frames_num
@@ -177,10 +184,19 @@ class FlashTalkPipeline:
         if self.color_correction_strength > 0.0:
             self.original_color_reference = cond_image_tensor.clone()
 
+        if self.cpu_offload:
+            self.clip.model.to(self.device)
         clip_context = self.clip.visual(cond_image_tensor[:, :, -1:, :, :]).to(self.param_dtype)
+        if self.cpu_offload:
+            self.clip.model.cpu()
+            torch.cuda.empty_cache()
+
         video_frames = torch.zeros(1, cond_image_tensor.shape[1], frame_num-cond_image_tensor.shape[2], self.target_h, self.target_w).to(self.device)
 
         padding_frames_pixels_values = torch.concat([cond_image_tensor, video_frames], dim=2)
+
+        if self.cpu_offload:
+            self.vae.model.to(self.device)
         y = self.vae.encode(padding_frames_pixels_values)
         common_y = y.unsqueeze(0).to(self.param_dtype)
 
@@ -225,6 +241,10 @@ class FlashTalkPipeline:
 
         self.latent_motion_frames = self.vae.encode(self.cond_image_tensor)
 
+        if self.cpu_offload:
+            self.vae.model.cpu()
+            torch.cuda.empty_cache()
+
         return
 
     @torch.no_grad()
@@ -253,7 +273,8 @@ class FlashTalkPipeline:
 
     @torch.no_grad()
     def generate(self, audio_embedding):
-
+        if self.cpu_offload:
+            self.model.to(self.device)
         # evaluation mode
         with torch.no_grad():
 
@@ -299,6 +320,11 @@ class FlashTalkPipeline:
 
                 latent[:, :self.latent_motion_frames.shape[1]] = self.latent_motion_frames
 
+            if self.cpu_offload:
+                self.model.cpu()
+                torch.cuda.empty_cache()
+                self.vae.model.to(self.device)
+
             torch.cuda.synchronize()
             start_decode_time = time.time()
             videos = self.vae.decode(latent)
@@ -325,6 +351,10 @@ class FlashTalkPipeline:
         end_encode_time = time.time()
         if self.rank == 0:
             print(f'[generate] encode motion frames: {end_encode_time - start_encode_time}s')
+
+        if self.cpu_offload:
+            self.vae.model.cpu()
+            torch.cuda.empty_cache()
 
         gen_video_samples = videos[:, :, self.motion_frames_num:]
 

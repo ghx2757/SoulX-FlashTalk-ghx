@@ -67,6 +67,10 @@ def _parse_args():
         default="stream",
         choices=['stream', 'once'],
         help="stream: encode audio chunk before every generation; once: encode audio together")
+    parser.add_argument(
+        "--cpu_offload",
+        action="store_true",
+        help="Enable CPU offload for low VRAM usage")
     args = parser.parse_args()
 
     _validate_args(args)
@@ -78,7 +82,7 @@ def save_video(frames_list, video_path, audio_path, fps):
     with imageio.get_writer(temp_video_path, format='mp4', mode='I',
                             fps=fps , codec='h264', ffmpeg_params=['-bf', '0']) as writer:
         for frames in frames_list:
-            frames = frames.cpu().numpy().astype(np.uint8)
+            frames = frames.numpy().astype(np.uint8)
             for i in range(frames.shape[0]):
                 frame = frames[i, :, :, :]
                 writer.append_data(frame)
@@ -100,7 +104,7 @@ def generate(args):
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     rank = int(os.environ.get("RANK", 0))
 
-    pipeline = get_pipeline(world_size=world_size, ckpt_dir=args.ckpt_dir, wav2vec_dir=args.wav2vec_dir)
+    pipeline = get_pipeline(world_size=world_size, ckpt_dir=args.ckpt_dir, wav2vec_dir=args.wav2vec_dir, cpu_offload=args.cpu_offload)
     get_base_data(pipeline, input_prompt=args.input_prompt, cond_image=args.cond_image, base_seed=args.base_seed)
 
     generated_list = []
@@ -126,7 +130,7 @@ def generate(args):
             if rank == 0:
                 logger.info(f"Generate video chunk-{chunk_idx} done, cost time: {(end_time - start_time):.2f}s")
 
-            generated_list.append(video)
+            generated_list.append(video.cpu())
 
     elif args.audio_encode_mode == 'stream':
         cached_audio_length_sum = sample_rate * cached_audio_duration
@@ -155,7 +159,7 @@ def generate(args):
             if rank == 0:
                 logger.info(f"Generate video chunk-{chunk_idx} done, cost time: {(end_time - start_time):.2f}s")
 
-            generated_list.append(video)
+            generated_list.append(video.cpu())
 
 
     if rank == 0:

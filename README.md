@@ -109,7 +109,7 @@ huggingface-cli download TencentGameMate/chinese-wav2vec2-base --local-dir ./mod
 ### 🚀 Inference
 ```bash
 # Infer on single GPU
-# Requires more than 64G of VRAM
+# Requires more than 64G of VRAM. Use --cpu_offload to reduce VRAM usage to 40G.
 bash inference_script_single_gpu.sh
 
 # Infer on multy GPUs
